@@ -1,0 +1,45 @@
+name: Draft release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.project.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: project
+        shell: bash
+        run: cmake "-DTAG=$GITHUB_REF_NAME" -P cmake/Version.cmake
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+
+  draft:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Realtime-MIDI-${{ needs.version.outputs.version }}-*
+          path: packages
+          merge-multiple: true
+      - name: Attach packages to draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          test -f "packages/Realtime-MIDI-$VERSION-windows-x64.zip"
+          test -f "packages/Realtime-MIDI-$VERSION-macos-universal.zip"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+            --repo "$GITHUB_REPOSITORY" --title "Realtime MIDI $VERSION" \
+            --notes "Proof of concept VST3 builds for host validation." packages/*.zip

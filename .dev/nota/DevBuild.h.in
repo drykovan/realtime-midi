@@ -1,0 +1,3 @@
+#pragma once
+
+#cmakedefine REALTIME_MIDI_DEV_BUILD "@REALTIME_MIDI_DEV_BUILD@"

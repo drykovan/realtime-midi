@@ -1,0 +1,12 @@
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/../CMakeLists.txt" project_line
+    REGEX "^project\\(RealtimeMIDI VERSION [0-9]+\\.[0-9]+\\.[0-9]+ ")
+if(NOT project_line MATCHES "VERSION ([0-9]+\\.[0-9]+\\.[0-9]+) ")
+    message(FATAL_ERROR "Could not read the project version")
+endif()
+set(version "${CMAKE_MATCH_1}")
+if(DEFINED TAG AND NOT TAG STREQUAL "v${version}")
+    message(FATAL_ERROR "Tag '${TAG}' must match 'v${version}'")
+endif()
+if(DEFINED ENV{GITHUB_OUTPUT})
+    file(APPEND "$ENV{GITHUB_OUTPUT}" "version=${version}\n")
+endif()
