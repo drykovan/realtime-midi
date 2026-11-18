@@ -63,6 +63,7 @@ void verifyNoisyPluck()
     constexpr double angular = 2.0 * 3.14159265358979323846 * 87.307;
     realtime_midi::PitchDetector detector;
     detector.prepare(rate);
+    detector.setControls(50.0f, 65.0f);
     std::uint32_t random = 42;
     double filteredNoise = 0.0;
     int attacks = 0;
@@ -94,6 +95,26 @@ void verifyNoisyPluck()
         throw std::runtime_error("Expected the noisy pluck to retrigger");
 }
 
+int detectSineWithWindow(float ms)
+{
+    constexpr int rate = 48000;
+    constexpr double phaseStep = 2.0 * 3.14159265358979323846 * 220.0 / rate;
+    realtime_midi::PitchDetector detector;
+    detector.prepare(rate);
+    detector.setControls(50.0f, ms);
+    for (int i = 0; i < rate / 4; ++i)
+    {
+        const auto change = detector.push(static_cast<float>(0.15 * std::sin(phaseStep * i)));
+        if (change.emit && change.root >= 0)
+        {
+            if (change.root != 57)
+                throw std::runtime_error("Incorrect note with selected analysis window");
+            return i;
+        }
+    }
+    throw std::runtime_error("No note with selected analysis window");
+}
+
 int main()
 {
     try
@@ -102,6 +123,8 @@ int main()
             verifyTiming(rate);
         verifyReset();
         verifyNoisyPluck();
+        if (detectSineWithWindow(90.0f) - detectSineWithWindow(30.0f) != 2880)
+            throw std::runtime_error("Analysis window did not change detection latency");
     }
     catch (const std::exception& e)
     {

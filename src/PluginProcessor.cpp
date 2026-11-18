@@ -17,13 +17,33 @@
 
 namespace
 {
+constexpr auto attackId = "attackSensitivity";
+constexpr auto windowId = "analysisWindow";
+
+juce::AudioProcessorValueTreeState::ParameterLayout makeParameterLayout()
+{
+    using Detector = realtime_midi::PitchDetector;
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+    layout.add(
+        std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{attackId, 1}, "Attack Sensitivity",
+            juce::NormalisableRange<float>{0.0f, 100.0f, 1.0f}, Detector::defaultSensitivity,
+            juce::AudioParameterFloatAttributes().withLabel("%")),
+        std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{windowId, 1}, "Analysis Window",
+            juce::NormalisableRange<float>{Detector::minWindowMs, Detector::maxWindowMs, 1.0f},
+            Detector::defaultWindowMs, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    return layout;
+}
+
 class RealtimeMIDI final : public juce::AudioProcessor
 {
 public:
     RealtimeMIDI()
         : AudioProcessor(BusesProperties()
                              .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                             .withOutput("Output", juce::AudioChannelSet::stereo(), true))
+                             .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+          parameters(*this, nullptr, "RealtimeMIDIParameters", makeParameterLayout())
     {
 #if JUCE_MAC && defined(REALTIME_MIDI_DEV_BUILD)
         const auto process = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFileName();
@@ -50,13 +70,15 @@ public:
     void prepareToPlay(double sampleRate, int maxBlockSize) override
     {
         reset();
+        updateDetectorControls();
         detector.prepare(sampleRate);
 #if defined(REALTIME_MIDI_ENABLE_IAC)
         iac.start();
 #endif
         // Even with a release and retrigger, this leaves ample space for
-        // four MIDI edges per 65 ms analysis window and transport cleanup.
-        const auto bytes = 64 * (2 + static_cast<std::size_t>(maxBlockSize / (sampleRate * 0.060)));
+        // four MIDI edges per minimum analysis window and transport cleanup.
+        const auto minimumWindow = sampleRate * realtime_midi::PitchDetector::minWindowMs / 1000.0;
+        const auto bytes = 64 * (2 + static_cast<std::size_t>(maxBlockSize / minimumWindow));
         firstOutput.ensureSize(std::max<std::size_t>(2048, bytes));
         nextOutput.ensureSize(std::max<std::size_t>(2048, bytes));
         firstBlock = true;
@@ -94,16 +116,34 @@ public:
     }
 
     bool hasEditor() const override { return true; }
-    juce::AudioProcessorEditor* createEditor() override { return new RealtimeMidiEditor(*this); }
+    juce::AudioProcessorEditor* createEditor() override
+    {
+        return new RealtimeMidiEditor(*this, *parameters.getParameter(attackId),
+                                     *parameters.getParameter(windowId));
+    }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
-    void getStateInformation(juce::MemoryBlock& state) override { state.reset(); }
-    void setStateInformation(const void*, int) override {}
+    void getStateInformation(juce::MemoryBlock& state) override
+    {
+        if (auto xml = parameters.copyState().createXml())
+            copyXmlToBinary(*xml, state);
+    }
+    void setStateInformation(const void* data, int size) override
+    {
+        if (auto xml = getXmlFromBinary(data, size); xml && xml->hasTagName(parameters.state.getType()))
+            parameters.replaceState(juce::ValueTree::fromXml(*xml));
+    }
 
 private:
+    void updateDetectorControls()
+    {
+        detector.setControls(attack->load(std::memory_order_relaxed),
+                             window->load(std::memory_order_relaxed));
+    }
+
 #if defined(REALTIME_MIDI_ENABLE_IAC)
     void releaseIac()
     {
@@ -131,9 +171,8 @@ private:
         firstBlock = false;
         output.clear();
 #if defined(REALTIME_MIDI_ENABLE_IAC)
-        const auto* playhead = getPlayHead();
-        const auto transport = playhead ? playhead->getPosition() : juce::nullopt;
-        const bool mirror = !isNonRealtime() && (!transport || transport->getIsPlaying());
+        // Input monitoring can feed audio with a stopped transport.
+        const bool mirror = !isNonRealtime();
         if (!mirror)
             releaseIac();
 #endif
@@ -168,6 +207,7 @@ private:
 
         if (!bypassed && audio.getNumChannels() > 0)
         {
+            updateDetectorControls();
             const auto* left = audio.getReadPointer(0);
             const auto* right = audio.getNumChannels() > 1 ? audio.getReadPointer(1) : left;
             for (int i = 0; i < samples; ++i)
@@ -191,6 +231,9 @@ private:
     IacProbe iac;
     std::array<int, 2> iacHeld{-1, -1};
 #endif
+    juce::AudioProcessorValueTreeState parameters;
+    const std::atomic<float>* attack = parameters.getRawParameterValue(attackId);
+    const std::atomic<float>* window = parameters.getRawParameterValue(windowId);
     realtime_midi::PitchDetector detector;
     std::array<int, 2> held{-1, -1};
     bool pendingOff = false;

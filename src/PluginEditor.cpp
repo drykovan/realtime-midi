@@ -20,10 +20,31 @@ void styleLabel(juce::Label& label, const juce::String& text, float height,
     label.setMinimumHorizontalScale(1.0f);
     label.setJustificationType(juce::Justification::centredLeft);
 }
+void styleSlider(juce::Slider& slider, const juce::String& title, const juce::String& suffix)
+{
+    slider.setTitle(title);
+    slider.setSliderStyle(juce::Slider::LinearHorizontal);
+    slider.textFromValueFunction = [suffix](double value)
+    {
+        return juce::String(juce::roundToInt(value)) + suffix;
+    };
+    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 65, 26);
+    slider.setColour(juce::Slider::backgroundColourId, border);
+    slider.setColour(juce::Slider::trackColourId, accent);
+    slider.setColour(juce::Slider::thumbColourId, foreground);
+    slider.setColour(juce::Slider::textBoxTextColourId, foreground);
+    slider.setColour(juce::Slider::textBoxOutlineColourId, border);
+    slider.setColour(juce::Slider::textBoxBackgroundColourId, panel);
 }
 
-RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor)
-    : AudioProcessorEditor(processor)
+}
+
+RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor,
+                                       juce::RangedAudioParameter& attack,
+                                       juce::RangedAudioParameter& window)
+    : AudioProcessorEditor(processor),
+      attackAttachment(attack, attackSlider),
+      windowAttachment(window, windowSlider)
 {
     styleLabel(title, "Realtime MIDI", 25.0f, foreground, true);
     styleLabel(versionLabel, "Version", 14.0f, secondary);
@@ -41,8 +62,17 @@ RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor)
     for (auto* label : {&title, &versionLabel, &versionValue, &buildLabel, &buildValue})
         addAndMakeVisible(*label);
 
+    styleLabel(attackLabel, "Attack Sensitivity", 14.0f, secondary);
+    styleLabel(windowLabel, "Analysis Window", 14.0f, secondary);
+    styleSlider(attackSlider, attackLabel.getText(), " %");
+    styleSlider(windowSlider, windowLabel.getText(), " ms");
+    addAndMakeVisible(attackLabel);
+    addAndMakeVisible(windowLabel);
+    addAndMakeVisible(attackSlider);
+    addAndMakeVisible(windowSlider);
+
     setOpaque(true);
-    setSize(400, 158);
+    setSize(440, 255);
 }
 
 void RealtimeMidiEditor::paint(juce::Graphics& graphics)
@@ -54,6 +84,11 @@ void RealtimeMidiEditor::paint(juce::Graphics& graphics)
     graphics.setColour(border);
     graphics.drawRoundedRectangle(card.reduced(0.5f), 9.0f, 1.0f);
     graphics.drawHorizontalLine(102, card.getX() + 12.0f, card.getRight() - 12.0f);
+    const auto controls = card.withY(154.0f).withHeight(81.0f);
+    graphics.setColour(panel);
+    graphics.fillRoundedRectangle(controls, 9.0f);
+    graphics.setColour(border);
+    graphics.drawRoundedRectangle(controls.reduced(0.5f), 9.0f, 1.0f);
 }
 
 void RealtimeMidiEditor::resized()
@@ -63,4 +98,8 @@ void RealtimeMidiEditor::resized()
     versionValue.setBounds(126, 67, getWidth() - 160, 35);
     buildLabel.setBounds(34, 103, 84, 35);
     buildValue.setBounds(126, 103, getWidth() - 160, 35);
+    attackLabel.setBounds(34, 156, 122, 38);
+    windowLabel.setBounds(34, 195, 122, 38);
+    attackSlider.setBounds(158, 156, getWidth() - 192, 38);
+    windowSlider.setBounds(158, 195, getWidth() - 192, 38);
 }

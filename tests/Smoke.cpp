@@ -17,6 +17,25 @@ void require(bool condition, const char* message)
         throw std::runtime_error(message);
 }
 
+void verifyParameterState()
+{
+    const std::unique_ptr<juce::AudioProcessor> source(createPluginFilter());
+    const std::unique_ptr<juce::AudioProcessor> restored(createPluginFilter());
+    const auto& parameters = source->getParameters();
+    const auto& copies = restored->getParameters();
+    require(parameters.size() == 2 && copies.size() == 2, "Expected two host parameters");
+    require(parameters[0]->getName(64) == "Attack Sensitivity"
+            && parameters[1]->getName(64) == "Analysis Window", "Incorrect host parameter names");
+    parameters[0]->setValueNotifyingHost(0.8f);
+    parameters[1]->setValueNotifyingHost(1.0f);
+
+    juce::MemoryBlock state;
+    source->getStateInformation(state);
+    restored->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    require(std::abs(copies[0]->getValue() - 0.8f) < 0.001f && copies[1]->getValue() == 1.0f,
+            "Parameter state did not survive loading");
+}
+
 void verify(int channels, int rate, bool withOvertone)
 {
     std::unique_ptr<juce::AudioProcessor> plugin(createPluginFilter());
@@ -78,6 +97,7 @@ int main()
 {
     try
     {
+        verifyParameterState();
         for (int rate : {44100, 48000, 96000})
             for (int channels : {1, 2})
                 for (bool overtone : {false, true})

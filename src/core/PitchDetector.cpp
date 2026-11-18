@@ -15,17 +15,35 @@ int midi(double frequency)
 }
 }
 
+void PitchDetector::setControls(float sensitivityPercent, float windowMs) noexcept
+{
+    const auto adjustment = (std::clamp(sensitivityPercent, 0.0f, 100.0f) - defaultSensitivity) / 100.0f;
+    relativeRise = 1.62f - 0.7f * adjustment;
+    attackFloor = 0.00065f * (1.0f - adjustment);
+    requestedWindowMs = std::clamp(windowMs, minWindowMs, maxWindowMs);
+}
+
+void PitchDetector::updateWindow() noexcept
+{
+    const auto requestedSize = std::clamp(static_cast<int>(rate * (requestedWindowMs / 1000.0)), 1,
+                                          static_cast<int>(frame.size()));
+    if (size == requestedSize)
+        return;
+
+    size = requestedSize;
+    for (int i = 0; i < size; ++i)
+        window[i] = static_cast<float>(0.5 - 0.5 * std::cos(2.0 * pi * i / size));
+}
+
 void PitchDetector::prepare(double sampleRate) noexcept
 {
     stride = std::max(1, static_cast<int>(std::lround(sampleRate / 10000.0)));
     rate = sampleRate / stride;
-    size = std::clamp(static_cast<int>(rate * 0.065), 1, static_cast<int>(frame.size()));
+    updateWindow();
     maxLag = std::min(static_cast<int>(rate / 45.0), static_cast<int>(difference.size()) - 1);
     fastStep = static_cast<float>(1.0 - std::exp(-1.0 / (rate * 0.002)));
     slowStep = static_cast<float>(1.0 - std::exp(-1.0 / (rate * 0.036)));
     levelStep = static_cast<float>(1.0 - std::exp(-1.0 / (rate * 0.018)));
-    for (int i = 0; i < size; ++i)
-        window[i] = static_cast<float>(0.5 - 0.5 * std::cos(2.0 * pi * i / size));
     reset();
 }
 
@@ -60,8 +78,9 @@ PitchDetector::Change PitchDetector::push(float input) noexcept
         --rootAge;
     if (cooldown > 0)
         --cooldown;
-    if (!capturing && cooldown == 0 && fast > std::max(0.00065f, slow * 1.62f))
+    if (!capturing && cooldown == 0 && fast > std::max(attackFloor, slow * relativeRise))
     {
+        updateWindow();
         collected = 0;
         capturing = true;
         retried = false;
