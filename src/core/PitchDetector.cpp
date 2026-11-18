@@ -33,7 +33,9 @@ void PitchDetector::reset() noexcept
 {
     fast = slow = level = last = sum = 0.0f;
     count = collected = cooldown = quiet = age = 0;
-    capturing = sounding = false;
+    capturing = sounding = retried = false;
+    recentRoot = 0.0;
+    rootAge = 0;
 }
 
 PitchDetector::Change PitchDetector::push(float input) noexcept
@@ -54,12 +56,15 @@ PitchDetector::Change PitchDetector::push(float input) noexcept
     slow += slowStep * (edge - slow);
     level += levelStep * (std::abs(sample) - level);
 
+    if (rootAge > 0)
+        --rootAge;
     if (cooldown > 0)
         --cooldown;
     if (!capturing && cooldown == 0 && fast > std::max(0.00065f, slow * 1.62f))
     {
         collected = 0;
         capturing = true;
+        retried = false;
         cooldown = static_cast<int>(rate * 0.09);
     }
 
@@ -69,7 +74,15 @@ PitchDetector::Change PitchDetector::push(float input) noexcept
         if (collected == size)
         {
             capturing = false;
-            auto change = estimate();
+            const auto change = estimate();
+            if (!change.emit && !retried)
+            {
+                // Give the pitched tail one more look after the noisy attack.
+                const int shift = std::max(1, size / 3);
+                std::move(frame.begin() + shift, frame.begin() + size, frame.begin());
+                collected = size - shift;
+                capturing = retried = true;
+            }
             if (change.emit)
             {
                 sounding = true;
@@ -104,6 +117,41 @@ double PitchDetector::harmonicPower(double frequency) const noexcept
     return std::max(0.0, previous * previous + before * before - coefficient * previous * before);
 }
 
+PitchDetector::Harmonics PitchDetector::measureHarmonics(double root, bool countSupport) const noexcept
+{
+    Harmonics result;
+    const int last = std::min(32, static_cast<int>(std::min(3600.0, rate * 0.44) / root));
+    std::array<double, 32> power{};
+    std::array<double, 33> gap{};
+    gap[0] = harmonicPower(root * 0.5);
+    for (int h = 1; h <= last; ++h)
+    {
+        const double hz = h * root;
+        const auto index = static_cast<std::size_t>(h - 1);
+        const double value = harmonicPower(hz);
+        power[index] = value;
+        result.onGrid += value;
+        result.between += gap[index];
+        if (h >= 2 && value > result.brightest)
+        {
+            result.brightest = value;
+            result.overtone = midi(hz);
+        }
+        if (h < last || countSupport)
+            gap[index + 1] = harmonicPower(hz + root * 0.5);
+    }
+    if (countSupport)
+    {
+        const auto dominant = *std::max_element(power.begin(), power.end());
+        // An occupied bin must stand above its local noise floor on both sides.
+        for (int index = 0; index < last; ++index)
+            if (power[index] >= dominant * 0.06
+                && power[index] > 3.0 * std::max(gap[index], gap[index + 1]))
+                ++result.supported;
+    }
+    return result;
+}
+
 PitchDetector::Change PitchDetector::estimate() noexcept
 {
     const int support = size - maxLag;
@@ -133,7 +181,7 @@ PitchDetector::Change PitchDetector::estimate() noexcept
     spectralEnergy *= size / 3.0;
 
     const int minLag = std::max(2, static_cast<int>(rate / 1000.0));
-    double bestScore = 0.0;
+    double bestScore = 0.0, bestRoot = 0.0;
     Change best{};
     // Check multiple plausible periods. Comparing on-grid energy with the
     // halfway points helps reject octaves when odd harmonics are present.
@@ -145,30 +193,35 @@ PitchDetector::Change PitchDetector::estimate() noexcept
             continue;
         const double period = lag + 0.5 * (left - right) / (left + right - 2.0 * center);
         const double root = rate / period;
-        const int lastHarmonic = std::min(32, static_cast<int>(std::min(3600.0, rate * 0.44) / root));
-        double onGrid = 0.0, between = 0.0, brightest = 0.0;
-        int overtone = -1;
-        for (int h = 1; h <= lastHarmonic; ++h)
-        {
-            const double hz = h * root;
-            const double power = harmonicPower(hz);
-            onGrid += power;
-            between += harmonicPower((h - 0.5) * root);
-            if (h >= 2 && power > brightest)
-            {
-                brightest = power;
-                overtone = midi(hz);
-            }
-        }
-        if (onGrid < 1e-8)
+        const auto harmonics = measureHarmonics(root, false);
+        if (harmonics.onGrid < 1e-8)
             continue;
-        const double agreement = onGrid / (onGrid + between);
-        const double coverage = std::min(1.0, onGrid / spectralEnergy);
+        const double agreement = harmonics.onGrid / (harmonics.onGrid + harmonics.between);
+        const double coverage = std::min(1.0, harmonics.onGrid / spectralEnergy);
         const double score = (1.0 - center) * agreement * coverage;
         if (agreement >= 0.68 && coverage >= 0.37 && score > bestScore * 1.015)
         {
             bestScore = score;
-            best = {true, midi(root), brightest >= onGrid * 0.12 ? overtone : -1};
+            bestRoot = root;
+            best = {true, midi(root), harmonics.brightest >= harmonics.onGrid * 0.12
+                                          ? harmonics.overtone : -1};
+        }
+    }
+    if (best.emit)
+    {
+        recentRoot = bestRoot;
+        rootAge = static_cast<int>(2.5 * rate);
+    }
+    else if (rootAge > 0 && spectralEnergy > 1e-8)
+    {
+        // A weak pluck can retain a harmonic comb even if period confidence
+        // dropped. Reuse a recent root only with fresh spectral evidence.
+        const auto harmonics = measureHarmonics(recentRoot, true);
+        if (harmonics.supported >= 3 && harmonics.onGrid >= spectralEnergy * 0.38
+            && harmonics.onGrid >= harmonics.between * 2.8)
+        {
+            best = {true, midi(recentRoot), harmonics.brightest >= harmonics.onGrid * 0.12
+                                               ? harmonics.overtone : -1};
         }
     }
     return best;

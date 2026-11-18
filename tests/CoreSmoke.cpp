@@ -1,5 +1,8 @@
 #include "NoteSequence.h"
+#include "PitchDetector.h"
 
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 
@@ -54,6 +57,43 @@ void verifyReset()
     require(sequence.flush([](NoteEvent e) { require(!e.noteOn && e.offset == 0); return true; }));
 }
 
+void verifyNoisyPluck()
+{
+    constexpr int rate = 44100;
+    constexpr double angular = 2.0 * 3.14159265358979323846 * 87.307;
+    realtime_midi::PitchDetector detector;
+    detector.prepare(rate);
+    std::uint32_t random = 42;
+    double filteredNoise = 0.0;
+    int attacks = 0;
+    for (int i = 0; i < rate * 2; ++i)
+    {
+        const double time = static_cast<double>(i) / rate;
+        random = 1664525u * random + 1013904223u;
+        const double whiteNoise = (random >> 8) / 8388608.0 - 1.0;
+        filteredNoise += 0.075 * (whiteNoise - filteredNoise);
+        double sample = 0.0;
+        if (time >= 0.10 && time < 0.25)
+            sample = 0.06 * std::sin(angular * (time - 0.10));
+        if (time >= 0.60 && time < 0.78)
+        {
+            const double phase = angular * (time - 0.60);
+            sample = 0.04 * std::sin(8 * phase) + 0.05 * std::sin(10 * phase)
+                   + 0.04 * std::sin(12 * phase) + 0.60 * filteredNoise;
+        }
+
+        const auto change = detector.push(static_cast<float>(sample));
+        if (change.emit && change.root >= 0)
+        {
+            ++attacks;
+            if (change.root != 41 || (attacks == 2 && change.overtone != 81))
+                throw std::runtime_error("Wrong pitch on clean or noisy pluck");
+        }
+    }
+    if (attacks != 2)
+        throw std::runtime_error("Expected the noisy pluck to retrigger");
+}
+
 int main()
 {
     try
@@ -61,6 +101,7 @@ int main()
         for (int rate : {44100, 48000, 96000, 44101})
             verifyTiming(rate);
         verifyReset();
+        verifyNoisyPluck();
     }
     catch (const std::exception& e)
     {
