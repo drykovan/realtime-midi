@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(RealtimeMIDI VERSION 0.0.1 LANGUAGES CXX)
 
 include(CTest)
-add_library(core STATIC src/core/NoteSequence.cpp)
+add_library(core STATIC src/core/NoteSequence.cpp src/core/PitchDetector.cpp)
 target_include_directories(core PUBLIC src/core)
 target_compile_features(core PUBLIC cxx_std_17)
 set_target_properties(core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -26,7 +26,7 @@ FetchContent_Declare(JUCE
 )
 FetchContent_MakeAvailable(JUCE)
 
-option(REALTIME_MIDI_ENABLE_IAC "Mirror test notes to macOS IAC Driver Bus 1" OFF)
+option(REALTIME_MIDI_ENABLE_IAC "Mirror detected notes to macOS IAC Driver Bus 1" OFF)
 
 juce_add_plugin(RealtimeMIDI
     PRODUCT_NAME "Realtime MIDI"

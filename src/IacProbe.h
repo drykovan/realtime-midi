@@ -1,6 +1,5 @@
 #pragma once
 
-#include "NoteSequence.h"
 #include <CoreMIDI/CoreMIDI.h>
 #include <array>
 #include <atomic>
@@ -48,8 +47,7 @@ public:
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             drain();
-            if (held)
-                send(false);
+            releaseHeld();
         });
     }
 
@@ -65,7 +63,7 @@ public:
         destination = 0;
     }
 
-    void enqueue(bool on) noexcept
+    void enqueue(int channel, int pitch, bool on) noexcept
     {
         if (!running.load(std::memory_order_relaxed))
             return;
@@ -77,11 +75,25 @@ public:
             overflow.store(true, std::memory_order_release);
             return;
         }
-        queue[index] = on;
+        queue[index] = {channel, pitch, on};
         write.store(next, std::memory_order_release);
     }
 
 private:
+    struct Edge
+    {
+        int channel;
+        int pitch;
+        bool on;
+    };
+
+    void releaseHeld()
+    {
+        for (std::size_t voice = 0; voice < held.size(); ++voice)
+            if (held[voice] >= 0)
+                send({static_cast<int>(voice) + 1, held[voice], false});
+    }
+
     void drain()
     {
         const auto end = write.load(std::memory_order_acquire);
@@ -92,28 +104,27 @@ private:
             index = (index + 1) % queue.size();
         }
         read.store(index, std::memory_order_release);
-        if (overflow.exchange(false) && held)
-            send(false);
+        if (overflow.exchange(false))
+            releaseHeld();
     }
 
-    void send(bool on)
+    void send(Edge event)
     {
-        using Event = realtime_midi::NoteEvent;
-        const Byte bytes[]{ static_cast<Byte>((on ? 0x90 : 0x80) | (Event::channel - 1)),
-                            Event::pitch, static_cast<Byte>(on ? Event::velocity : 0) };
+        const Byte bytes[]{ static_cast<Byte>((event.on ? 0x90 : 0x80) | (event.channel - 1)),
+                            static_cast<Byte>(event.pitch), static_cast<Byte>(event.on ? 100 : 0) };
         MIDIPacketList packet{};
         const auto first = MIDIPacketListInit(&packet);
         MIDIPacketListAdd(&packet, sizeof packet, first, 0, sizeof bytes, bytes);
         if (MIDISend(port, destination, &packet) == noErr)
-            held = on;
+            held[static_cast<std::size_t>(event.channel - 1)] = event.on ? event.pitch : -1;
     }
 
     MIDIClientRef client = 0;
     MIDIPortRef port = 0;
     MIDIEndpointRef destination = 0;
     std::thread worker;
-    std::array<bool, 64> queue{};
+    std::array<Edge, 64> queue{};
     std::atomic<std::size_t> read{0}, write{0};
     std::atomic<bool> running{false}, overflow{false};
-    bool held = false;
+    std::array<int, 2> held{-1, -1};
 };

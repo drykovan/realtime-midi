@@ -1,9 +1,10 @@
-#include "NoteSequence.h"
+#include "PitchDetector.h"
 #include "DevBuild.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-#include <cmath>
+#include <algorithm>
+#include <array>
 
 #if JUCE_MAC && defined(REALTIME_MIDI_DEV_BUILD)
 #include <unistd.h>
@@ -47,14 +48,14 @@ public:
 
     void prepareToPlay(double sampleRate, int maxBlockSize) override
     {
-        sequence.prepare(sampleRate);
+        reset();
+        detector.prepare(sampleRate);
 #if defined(REALTIME_MIDI_ENABLE_IAC)
         iac.start();
 #endif
-        // Budget two events per second, plus a boundary event and reset cleanup.
-        // JUCE 8 stores each three-byte MIDI message in nine bytes.
-        const double half = std::max(1.0, std::floor(sampleRate * 0.5));
-        const auto bytes = 16 * (4 + static_cast<std::size_t>(maxBlockSize / half));
+        // Even with a release and retrigger, this leaves ample space for
+        // four MIDI edges per 65 ms analysis window and transport cleanup.
+        const auto bytes = 64 * (2 + static_cast<std::size_t>(maxBlockSize / (sampleRate * 0.060)));
         firstOutput.ensureSize(std::max<std::size_t>(2048, bytes));
         nextOutput.ensureSize(std::max<std::size_t>(2048, bytes));
         firstBlock = true;
@@ -69,11 +70,10 @@ public:
     }
     void reset() override
     {
-        sequence.reset();
+        detector.reset();
+        pendingOff = true;
 #if defined(REALTIME_MIDI_ENABLE_IAC)
-        if (iacNoteActive)
-            iac.enqueue(false);
-        iacNoteActive = false;
+        releaseIac();
 #endif
     }
 
@@ -83,13 +83,13 @@ public:
     void processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi) override
     {
         // JUCE supplies the matching input and output channels in place.
-        renderEvents(audio.getNumSamples(), midi, false);
+        renderEvents(audio, midi, false);
     }
 
     void processBlockBypassed(juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi) override
     {
         reset();
-        renderEvents(audio.getNumSamples(), midi, true);
+        renderEvents(audio, midi, true);
     }
 
     bool hasEditor() const override { return false; }
@@ -103,16 +103,29 @@ public:
     void setStateInformation(const void*, int) override {}
 
 private:
-    void renderEvents(int samples, juce::MidiBuffer& midi, bool bypassed)
+#if defined(REALTIME_MIDI_ENABLE_IAC)
+    void releaseIac()
     {
+        for (std::size_t voice = 0; voice < iacHeld.size(); ++voice)
+        {
+            if (iacHeld[voice] >= 0)
+                iac.enqueue(static_cast<int>(voice) + 1, iacHeld[voice], false);
+            iacHeld[voice] = -1;
+        }
+    }
+#endif
+
+    void renderEvents(const juce::AudioBuffer<float>& audio, juce::MidiBuffer& midi, bool bypassed)
+    {
+        const int samples = audio.getNumSamples();
         if (samples == 0)
         {
             midi.clear();
             return;
         }
 
-        // The VST3 wrapper reuses its MIDI buffer. Park its original backing
-        // store, then exchange the two stores reserved during prepareToPlay.
+        // Park the wrapper's initial MIDI buffer and exchange two stores
+        // reserved during prepareToPlay for the rest of the session.
         auto& output = firstBlock ? firstOutput : nextOutput;
         firstBlock = false;
         output.clear();
@@ -120,41 +133,66 @@ private:
         const auto* playhead = getPlayHead();
         const auto transport = playhead ? playhead->getPosition() : juce::nullopt;
         const bool mirror = !isNonRealtime() && (!transport || transport->getIsPlaying());
-        if (!mirror && iacNoteActive)
-        {
-            iac.enqueue(false);
-            iacNoteActive = false;
-        }
-        const auto send = [this, &output, mirror](realtime_midi::NoteEvent note)
-#else
-        const auto send = [&output](realtime_midi::NoteEvent note)
+        if (!mirror)
+            releaseIac();
 #endif
+        const auto send = [&](std::size_t voice, int pitch, bool on, int offset)
         {
+            const int channel = static_cast<int>(voice) + 1;
+            output.addEvent(on ? juce::MidiMessage::noteOn(channel, pitch, juce::uint8{100})
+                               : juce::MidiMessage::noteOff(channel, pitch), offset);
 #if defined(REALTIME_MIDI_ENABLE_IAC)
-            if (mirror && iacNoteActive != note.noteOn)
+            if (mirror && (on || iacHeld[voice] == pitch))
             {
-                iac.enqueue(note.noteOn);
-                iacNoteActive = note.noteOn;
+                iac.enqueue(channel, pitch, on);
+                iacHeld[voice] = on ? pitch : -1;
             }
 #endif
-            return output.addEvent(note.noteOn
-                ? juce::MidiMessage::noteOn(note.channel, note.pitch, juce::uint8{note.velocity})
-                : juce::MidiMessage::noteOff(note.channel, note.pitch), note.offset);
+        };
+        const auto release = [&](int offset)
+        {
+            for (std::size_t voice = 0; voice < held.size(); ++voice)
+            {
+                if (held[voice] >= 0)
+                    send(voice, held[voice], false, offset);
+                held[voice] = -1;
+            }
         };
 
-        if (bypassed)
-            sequence.flush(send);
-        else
-            sequence.process(samples, send);
+        if (pendingOff)
+        {
+            release(0);
+            pendingOff = false;
+        }
+
+        if (!bypassed && audio.getNumChannels() > 0)
+        {
+            const auto* left = audio.getReadPointer(0);
+            const auto* right = audio.getNumChannels() > 1 ? audio.getReadPointer(1) : left;
+            for (int i = 0; i < samples; ++i)
+            {
+                const auto change = detector.push(0.5f * (left[i] + right[i]));
+                if (!change.emit)
+                    continue;
+
+                release(i);
+                held = {change.root, change.overtone};
+                for (std::size_t voice = 0; voice < held.size(); ++voice)
+                    if (held[voice] >= 0)
+                        send(voice, held[voice], true, i);
+            }
+        }
 
         midi.swapWith(output);
     }
 
 #if defined(REALTIME_MIDI_ENABLE_IAC)
     IacProbe iac;
-    bool iacNoteActive = false;
+    std::array<int, 2> iacHeld{-1, -1};
 #endif
-    realtime_midi::NoteSequence sequence;
+    realtime_midi::PitchDetector detector;
+    std::array<int, 2> held{-1, -1};
+    bool pendingOff = false;
     juce::MidiBuffer firstOutput, nextOutput;
     bool firstBlock = true;
 };
