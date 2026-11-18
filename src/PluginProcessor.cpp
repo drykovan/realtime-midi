@@ -1,4 +1,5 @@
 #include "PitchDetector.h"
+#include "PluginEditor.h"
 #include "DevBuild.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -92,8 +93,8 @@ public:
         renderEvents(audio, midi, true);
     }
 
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return true; }
+    juce::AudioProcessorEditor* createEditor() override { return new RealtimeMidiEditor(*this); }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}

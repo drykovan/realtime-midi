@@ -42,12 +42,12 @@ juce_add_plugin(RealtimeMIDI
     FORMATS VST3
 )
 set(REALTIME_MIDI_DEV_BUILD "" CACHE STRING "Local Nota UTC build stamp")
-if(REALTIME_MIDI_DEV_BUILD AND NOT REALTIME_MIDI_DEV_BUILD MATCHES "^[0-9]+T[0-9]+[.][0-9]+Z$")
+if(REALTIME_MIDI_DEV_BUILD AND NOT REALTIME_MIDI_DEV_BUILD MATCHES "^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$")
     message(FATAL_ERROR "REALTIME_MIDI_DEV_BUILD must be a UTC timestamp")
 endif()
 configure_file(.dev/nota/DevBuild.h.in generated/DevBuild.h)
 target_include_directories(RealtimeMIDI PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_sources(RealtimeMIDI PRIVATE src/PluginProcessor.cpp)
+target_sources(RealtimeMIDI PRIVATE src/PluginProcessor.cpp src/PluginEditor.cpp)
 target_compile_definitions(RealtimeMIDI PUBLIC
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
 )

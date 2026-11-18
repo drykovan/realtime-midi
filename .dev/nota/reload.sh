@@ -17,7 +17,11 @@ build() (
     mkdir -p "$build_dir"
     mkdir "$lock" || { printf 'Another Nota build or deployment is in progress.\n' >&2; exit 1; }
     trap 'rmdir "$lock"' EXIT
-    stamp="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"))')"
+    stamp="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    if [[ -f "$attempt" ]] && [[ "$stamp" == "$(cat "$attempt")" ]]; then
+        sleep 1
+        stamp="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    fi
     printf '%s\n' "$stamp" > "$attempt"
     printf 'Building Realtime MIDI dev build %s\n' "$stamp"
 
