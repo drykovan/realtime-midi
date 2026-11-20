@@ -31,6 +31,8 @@ public:
 
 private:
     void timerCallback() override;
+    void setHintError(int voice, bool invalid);
+    void openNotePicker(int voice);
     struct RecentNote
     {
         int pitch = -1;
@@ -48,6 +50,11 @@ private:
     juce::AudioProcessorValueTreeState::ButtonAttachment hintsAttachment;
     juce::Label fundamentalLabel, overtoneLabel, hintStatus;
     std::array<juce::TextEditor, 2> hintFields;
+    juce::DrawableButton fundamentalPicker{"Pick fundamental notes", juce::DrawableButton::ImageFitted};
+    juce::DrawableButton overtonePicker{"Pick overtone notes", juce::DrawableButton::ImageFitted};
+    juce::TooltipWindow pickerTooltips{this};
+    std::array<juce::String, 2> confirmedHints;
+    std::array<bool, 2> hintErrors{};
     ReadHints readHints;
     WriteHints writeHints;
 };

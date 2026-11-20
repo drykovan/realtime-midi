@@ -56,7 +56,8 @@ public:
             const int letter = juce::String("CDEFGAB").indexOfChar(juce::CharacterFunctions::toUpperCase(token[0]));
             if (letter < 0)
                 return false;
-            const int accidental = token[1] == '#' ? 1 : token[1] == 'b' ? -1 : 0;
+            const auto symbol = juce::CharacterFunctions::toLowerCase(token[1]);
+            const int accidental = symbol == '#' ? 1 : symbol == 'b' ? -1 : 0;
             const auto octaveText = token.substring(accidental == 0 ? 1 : 2);
             const int octave = octaveText.getIntValue();
             if (octave < -2 || octave > 10 || octaveText != juce::String(octave))

@@ -38,6 +38,7 @@ juce_add_plugin(RealtimeMIDI
     IS_MIDI_EFFECT FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT TRUE
+    EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     VST3_CATEGORIES Fx
     FORMATS VST3
 )
@@ -52,7 +53,7 @@ target_compile_definitions(RealtimeMIDI PUBLIC
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
 )
 target_link_libraries(RealtimeMIDI
-    PRIVATE core juce::juce_audio_processors
+    PRIVATE core juce::juce_audio_processors juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags
 )
 

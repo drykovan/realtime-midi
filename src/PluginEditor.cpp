@@ -1,6 +1,8 @@
 #include "PluginEditor.h"
 #include "DevBuild.h"
 #include <algorithm>
+#include <bitset>
+#include <juce_audio_utils/juce_audio_utils.h>
 
 void DetectedNotes::push(int fundamental, int overtone) noexcept
 {
@@ -30,6 +32,133 @@ const auto secondary = juce::Colour::fromRGB(170, 181, 188);
 const auto accent = juce::Colour::fromRGB(155, 217, 195);
 constexpr double historyMs = 1200.0;
 constexpr double holdMs = 350.0;
+
+juce::String noteName(int pitch)
+{
+    return juce::MidiMessage::getMidiNoteName(pitch, true, true, 4);
+}
+
+class PickerKeyboard final : public juce::MidiKeyboardComponent
+{
+public:
+    PickerKeyboard(juce::MidiKeyboardState& state, std::bitset<128>& notes)
+        : MidiKeyboardComponent(state, horizontalKeyboard), selected(notes)
+    {
+        clearKeyMappings();
+        setScrollButtonsVisible(false);
+        setWantsKeyboardFocus(false);
+        setColour(keyDownOverlayColourId, accent.withAlpha(0.78f));
+    }
+
+    std::function<void()> onSelectionChange;
+
+private:
+    bool mouseDownOnKey(int note, const juce::MouseEvent&) override
+    {
+        selected.flip(note);
+        repaint();
+        if (onSelectionChange)
+            onSelectionChange();
+        return false;
+    }
+
+    bool mouseDraggedToKey(int, const juce::MouseEvent&) override { return false; }
+
+    juce::String getWhiteNoteText(int note) override { return noteName(note); }
+
+    void drawWhiteNote(int note, juce::Graphics& g, juce::Rectangle<float> bounds, bool,
+                       bool over, juce::Colour line, juce::Colour label) override
+    {
+        MidiKeyboardComponent::drawWhiteNote(note, g, bounds, selected[note], over, line, label);
+    }
+
+    void drawBlackNote(int note, juce::Graphics& g, juce::Rectangle<float> bounds, bool,
+                       bool over, juce::Colour fill) override
+    {
+        MidiKeyboardComponent::drawBlackNote(note, g, bounds, selected[note], over, fill);
+    }
+
+    std::bitset<128>& selected;
+};
+
+class NotePicker final : public juce::Component
+{
+public:
+    NotePicker(const juce::String& initial, int defaultOctave,
+               std::function<void(const juce::String&)> apply)
+    {
+        const auto names = juce::StringArray::fromTokens(initial, ", ", "");
+        int initialOctave = defaultOctave;
+        bool first = true;
+        for (int note = 0; note < 128; ++note)
+            if (names.contains(noteName(note)))
+            {
+                selected.set(note);
+                if (first)
+                    initialOctave = note / 12 - 1;
+                first = false;
+            }
+
+        for (int i = -1; i <= 9; ++i)
+            octave.addItem("Octave " + juce::String(i), i + 2);
+        octave.onChange = [this] { showOctave(); };
+        octave.setSelectedId(initialOctave + 2, juce::dontSendNotification);
+        showOctave();
+        keyboard.onSelectionChange = [this, apply = std::move(apply)]
+        {
+            juce::StringArray namesToApply;
+            for (int note = 0; note < 128; ++note)
+                if (selected[note])
+                    namesToApply.add(noteName(note));
+            apply(namesToApply.joinIntoString(", "));
+        };
+        addAndMakeVisible(octave);
+        addAndMakeVisible(keyboard);
+        setSize(338, 144);
+    }
+
+    void resized() override
+    {
+        octave.setBounds(0, 0, 110, 26);
+        keyboard.setBounds(0, 36, getWidth(), getHeight() - 36);
+        keyboard.setKeyWidth(static_cast<float>(getWidth()) / 7.0f);
+    }
+
+private:
+    void showOctave()
+    {
+        const int firstNote = (octave.getSelectedId() - 1) * 12;
+        keyboard.setAvailableRange(firstNote, std::min(127, firstNote + 11));
+        keyboard.setLowestVisibleKey(firstNote);
+    }
+
+    std::bitset<128> selected;
+    juce::MidiKeyboardState keyboardState;
+    PickerKeyboard keyboard{keyboardState, selected};
+    juce::ComboBox octave;
+};
+
+void stylePickerButton(juce::DrawableButton& button)
+{
+    button.setTooltip(button.getName());
+    juce::Path whiteKeys;
+    whiteKeys.addRoundedRectangle(1.0f, 2.0f, 20.0f, 13.0f, 1.5f);
+    for (const float x : {5.0f, 9.0f, 13.0f, 17.0f})
+    {
+        whiteKeys.startNewSubPath(x, x == 13.0f ? 2.0f : 9.0f);
+        whiteKeys.lineTo(x, 15.0f);
+    }
+    juce::Path blackKeys;
+    for (const float x : {5.0f, 9.0f, 17.0f})
+        blackKeys.addRoundedRectangle(x - 1.25f, 2.0f, 2.5f, 7.5f, 0.6f);
+    juce::Path icon;
+    juce::PathStrokeType(1.2f).createStrokedPath(icon, whiteKeys);
+    icon.addPath(blackKeys);
+    juce::DrawablePath drawing;
+    drawing.setPath(icon);
+    drawing.setFill(foreground);
+    button.setImages(&drawing);
+}
 
 void styleLabel(juce::Label& label, const juce::String& text, float height,
                 juce::Colour colour, bool bold = false)
@@ -111,23 +240,75 @@ RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor,
         field.setColour(juce::TextEditor::textColourId, foreground);
         field.setColour(juce::TextEditor::outlineColourId, border);
         field.setColour(juce::TextEditor::focusedOutlineColourId, accent);
-        field.setText(readHints(voice), false);
+        confirmedHints[voice] = readHints(voice);
+        field.setText(confirmedHints[voice], false);
         auto apply = [this, voice]
         {
             auto& editor = hintFields[voice];
-            const bool valid = writeHints(voice, editor.getText());
-            hintStatus.setText(valid ? "" : "Enter note names with octaves, separated by commas.",
-                               juce::dontSendNotification);
-            editor.setText(readHints(voice), false);
+            if (editor.getText() == confirmedHints[voice])
+            {
+                setHintError(voice, false);
+                return;
+            }
+            if (!writeHints(voice, editor.getText()))
+            {
+                setHintError(voice, true);
+                return;
+            }
+            confirmedHints[voice] = readHints(voice);
+            editor.setText(confirmedHints[voice], false);
+            setHintError(voice, false);
         };
         field.onReturnKey = apply;
         field.onFocusLost = apply;
-        field.onEscapeKey = [this, voice] { hintFields[voice].setText(readHints(voice), false); };
+        field.onEscapeKey = [this, voice]
+        {
+            confirmedHints[voice] = readHints(voice);
+            hintFields[voice].setText(confirmedHints[voice], false);
+            setHintError(voice, false);
+        };
         addAndMakeVisible(field);
     }
+    for (auto* button : {&fundamentalPicker, &overtonePicker})
+    {
+        stylePickerButton(*button);
+        addAndMakeVisible(*button);
+    }
+    fundamentalPicker.onClick = [this] { openNotePicker(0); };
+    overtonePicker.onClick = [this] { openNotePicker(1); };
     startTimerHz(30);
     setOpaque(true);
     setSize(440, 522);
+}
+
+void RealtimeMidiEditor::openNotePicker(int voice)
+{
+    auto picker = std::make_unique<NotePicker>(
+        readHints(voice), voice == 0 ? 2 : 5,
+        [editor = juce::Component::SafePointer<RealtimeMidiEditor>(this), voice](const juce::String& notes)
+        {
+            if (editor != nullptr && editor->writeHints(voice, notes))
+            {
+                editor->confirmedHints[voice] = editor->readHints(voice);
+                editor->hintFields[voice].setText(editor->confirmedHints[voice], false);
+                editor->setHintError(voice, false);
+            }
+        });
+    auto& button = voice == 0 ? fundamentalPicker : overtonePicker;
+    juce::CallOutBox::launchAsynchronously(std::move(picker), button.getScreenBounds(), nullptr);
+}
+
+void RealtimeMidiEditor::setHintError(int voice, bool invalid)
+{
+    hintErrors[voice] = invalid;
+    hintFields[voice].setColour(juce::TextEditor::outlineColourId,
+                                invalid ? juce::Colour::fromRGB(231, 159, 136) : border);
+    hintFields[voice].setColour(juce::TextEditor::focusedOutlineColourId,
+                                invalid ? juce::Colour::fromRGB(231, 159, 136) : accent);
+    hintStatus.setText(hintErrors[0] || hintErrors[1]
+                           ? "Use notes like G3, Bb4 or C#5. Last valid list kept."
+                           : "",
+                       juce::dontSendNotification);
 }
 
 void RealtimeMidiEditor::timerCallback()
@@ -163,11 +344,15 @@ void RealtimeMidiEditor::timerCallback()
         return;
     hintRefresh = 0;
     for (int voice = 0; voice < 2; ++voice)
-        if (!hintFields[voice].hasKeyboardFocus(false))
+        if (!hintFields[voice].hasKeyboardFocus(false)
+            && hintFields[voice].getText() == confirmedHints[voice])
         {
             const auto saved = readHints(voice);
-            if (hintFields[voice].getText() != saved)
+            if (confirmedHints[voice] != saved)
+            {
+                confirmedHints[voice] = saved;
                 hintFields[voice].setText(saved, false);
+            }
         }
 }
 
@@ -219,7 +404,7 @@ void RealtimeMidiEditor::paint(juce::Graphics& graphics)
             graphics.setColour(colour.withAlpha(alpha * 0.19f));
             graphics.fillRoundedRectangle(chip.toFloat(), 4.0f);
             graphics.setColour(colour.withAlpha(alpha));
-            graphics.drawFittedText(juce::MidiMessage::getMidiNoteName(note.pitch, true, true, 4),
+            graphics.drawFittedText(noteName(note.pitch),
                                     chip.reduced(1, 0), juce::Justification::centred, 1, 0.75f);
         }
     }
@@ -239,7 +424,9 @@ void RealtimeMidiEditor::resized()
     hintsToggle.setBounds(32, 255, 140, 28);
     fundamentalLabel.setBounds(34, 286, 110, 26);
     overtoneLabel.setBounds(34, 320, 110, 26);
-    hintFields[0].setBounds(158, 286, getWidth() - 192, 26);
-    hintFields[1].setBounds(158, 320, getWidth() - 192, 26);
+    hintFields[0].setBounds(158, 286, getWidth() - 224, 26);
+    hintFields[1].setBounds(158, 320, getWidth() - 224, 26);
+    fundamentalPicker.setBounds(getWidth() - 62, 286, 28, 26);
+    overtonePicker.setBounds(getWidth() - 62, 320, 28, 26);
     hintStatus.setBounds(34, 349, getWidth() - 68, 26);
 }
