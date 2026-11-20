@@ -2,16 +2,25 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <functional>
+#include <deque>
+#include <optional>
 #include <atomic>
 #include <cstdint>
 
 class DetectedNotes
 {
 public:
-    void push(int fundamental, int overtone) noexcept;
+    struct Event
+    {
+        std::uint32_t time;
+        int pitch;
+        std::size_t voice;
+        bool on;
+    };
+    void push(Event event) noexcept;
     std::uint64_t latest() const noexcept { return published.load(std::memory_order_acquire); }
-    std::array<int, 2> read(std::uint64_t sequence) const noexcept;
-    static constexpr std::size_t capacity = 64;
+    std::optional<Event> read(std::uint64_t sequence) const noexcept;
+    static constexpr std::size_t capacity = 512;
 
 private:
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
@@ -35,12 +44,13 @@ private:
     void openNotePicker(int voice);
     struct RecentNote
     {
-        int pitch = -1;
-        double seenAt = 0.0;
+        int pitch;
+        std::uint32_t start;
+        std::optional<std::uint32_t> end;
     };
     const DetectedNotes& detectedNotes;
     std::uint64_t lastRead;
-    std::array<std::array<RecentNote, 8>, 2> recent{};
+    std::array<std::deque<RecentNote>, 2> recent;
     int hintRefresh = 0;
     juce::Label buildStatus;
     juce::Label attackLabel, windowLabel;

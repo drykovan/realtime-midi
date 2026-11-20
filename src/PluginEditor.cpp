@@ -4,22 +4,24 @@
 #include <bitset>
 #include <juce_audio_utils/juce_audio_utils.h>
 
-void DetectedNotes::push(int fundamental, int overtone) noexcept
+void DetectedNotes::push(Event event) noexcept
 {
     const auto sequence = published.load(std::memory_order_relaxed) + 1;
-    const auto payload = (sequence << 16)
-                       | (static_cast<std::uint64_t>(fundamental + 1) << 8)
-                       | static_cast<std::uint64_t>(overtone + 1);
+    // The sequence tag lets the reader detect a slot replaced during a read.
+    const auto payload = ((sequence & 0xffff) << 48)
+                       | (static_cast<std::uint64_t>(event.time) << 16)
+                       | (event.voice << 8) | (event.on ? 128 : 0) | event.pitch;
     slots[sequence % capacity].store(payload, std::memory_order_relaxed);
     published.store(sequence, std::memory_order_release);
 }
 
-std::array<int, 2> DetectedNotes::read(std::uint64_t sequence) const noexcept
+std::optional<DetectedNotes::Event> DetectedNotes::read(std::uint64_t sequence) const noexcept
 {
     const auto payload = slots[sequence % capacity].load(std::memory_order_relaxed);
-    if ((payload >> 16) != sequence)
-        return {-1, -1};
-    return {static_cast<int>((payload >> 8) & 255) - 1, static_cast<int>(payload & 255) - 1};
+    if ((payload >> 48) != (sequence & 0xffff))
+        return std::nullopt;
+    return Event{static_cast<std::uint32_t>(payload >> 16), static_cast<int>(payload & 127),
+                 static_cast<std::size_t>((payload >> 8) & 1), (payload & 128) != 0};
 }
 
 namespace
@@ -30,8 +32,7 @@ const auto border = juce::Colour::fromRGB(52, 57, 63);
 const auto foreground = juce::Colour::fromRGB(238, 241, 242);
 const auto secondary = juce::Colour::fromRGB(170, 181, 188);
 const auto accent = juce::Colour::fromRGB(155, 217, 195);
-constexpr double historyMs = 1200.0;
-constexpr double holdMs = 350.0;
+constexpr int historyMs = 5000;
 constexpr int historyTop = 16, historyHeight = 107;
 constexpr int controlsTop = historyTop + historyHeight + 12, controlsHeight = 81;
 constexpr int hintsTop = controlsTop + controlsHeight + 12, hintsHeight = 131;
@@ -197,7 +198,7 @@ RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor,
                                       juce::AudioProcessorValueTreeState& parameters,
                                       ReadHints read, WriteHints write, const DetectedNotes& notes)
     : AudioProcessorEditor(processor),
-      detectedNotes(notes), lastRead(notes.latest()),
+      detectedNotes(notes), lastRead(notes.latest() > DetectedNotes::capacity ? notes.latest() - DetectedNotes::capacity : 0),
       attackAttachment(*parameters.getParameter("attackSensitivity"), attackSlider),
       windowAttachment(*parameters.getParameter("analysisWindow"), windowSlider),
       hintsAttachment(parameters, "pitchHints", hintsToggle),
@@ -310,30 +311,33 @@ void RealtimeMidiEditor::setHintError(int voice, bool invalid)
 
 void RealtimeMidiEditor::timerCallback()
 {
-    const auto now = juce::Time::getMillisecondCounterHiRes();
+    const auto now = juce::Time::getMillisecondCounter();
     const auto latest = detectedNotes.latest();
     if (latest - lastRead > DetectedNotes::capacity)
+    {
+        for (auto& row : recent)
+            row.clear();
         lastRead = latest - DetectedNotes::capacity;
+    }
+    bool refresh = latest != lastRead;
     while (lastRead < latest)
     {
-        const auto pitches = detectedNotes.read(++lastRead);
-        for (std::size_t voice = 0; voice < recent.size(); ++voice)
-            if (pitches[voice] >= 0)
-            {
-                auto& row = recent[voice];
-                std::move_backward(row.begin(), row.end() - 1, row.end());
-                row.front() = {pitches[voice], now};
-            }
+        const auto event = detectedNotes.read(++lastRead);
+        if (!event)
+            continue;
+        auto& row = recent[event->voice];
+        if (!row.empty() && !row.back().end)
+            row.back().end = event->time;
+        if (event->on)
+            row.push_back({event->pitch, event->time, std::nullopt});
     }
-    bool refresh = false;
     for (auto& row : recent)
-        for (auto& note : row)
-            if (note.pitch >= 0)
-            {
-                refresh = true;
-                if (now - note.seenAt >= historyMs)
-                    note.pitch = -1;
-            }
+    {
+        refresh = refresh || !row.empty();
+        while (!row.empty() && row.front().end
+               && static_cast<int>(now - *row.front().end) >= historyMs)
+            row.pop_front();
+    }
     if (refresh)
         repaint(20, historyTop, getWidth() - 40, historyHeight);
 
@@ -370,28 +374,49 @@ void RealtimeMidiEditor::paint(juce::Graphics& graphics)
     graphics.setFont(juce::FontOptions(14.0f));
     graphics.setColour(foreground);
     graphics.drawText("Recent Notes", 34, historyTop + 7, 120, 24, juce::Justification::centredLeft);
-    const auto now = juce::Time::getMillisecondCounterHiRes();
+    const auto now = juce::Time::getMillisecondCounter();
+    const float right = static_cast<float>(getWidth() - 34);
+    constexpr float left = 124.0f;
+    const float pixelsPerMs = (right - left) / historyMs;
+    graphics.setColour(secondary);
+    graphics.setFont(juce::FontOptions(11.0f));
+    graphics.drawText("Last 5 s", static_cast<int>(right) - 56, historyTop + 7, 56, 24,
+                      juce::Justification::centredRight);
+    graphics.setColour(border);
+    for (int seconds = 0; seconds <= 5; ++seconds)
+    {
+        const float x = right - 1000.0f * seconds * pixelsPerMs;
+        graphics.drawVerticalLine(juce::roundToInt(x), historyTop + 34.0f, historyTop + 92.0f);
+    }
     for (std::size_t voice = 0; voice < recent.size(); ++voice)
     {
         const int y = historyTop + 35 + 31 * static_cast<int>(voice);
         graphics.setColour(secondary);
+        graphics.setFont(juce::FontOptions(13.0f));
         graphics.drawText(voice == 0 ? "Fundamental" : "Overtones",
-                          34, y, 110, 24, juce::Justification::centredLeft);
-        for (std::size_t i = 0; i < recent[voice].size(); ++i)
+                          34, y, 88, 24, juce::Justification::centredLeft);
+        for (const auto& note : recent[voice])
         {
-            const auto note = recent[voice][i];
-            if (note.pitch < 0)
+            const auto position = [&](std::uint32_t time)
+            {
+                return right - static_cast<int>(now - time) * pixelsPerMs;
+            };
+            const float start = std::max(left, position(note.start));
+            const float end = std::min(right, note.end ? position(*note.end) : right);
+            if (end <= start)
                 continue;
-            const auto alpha = static_cast<float>(std::clamp((historyMs - (now - note.seenAt))
-                                                             / (historyMs - holdMs), 0.0, 1.0));
-            const int x = getWidth() - 34 - 29 - 31 * static_cast<int>(i);
-            const juce::Rectangle<int> chip(x, y, 29, 24);
-            const auto colour = voice == 0 ? accent : juce::Colour::fromRGB(184, 196, 244);
-            graphics.setColour(colour.withAlpha(alpha * 0.19f));
-            graphics.fillRoundedRectangle(chip.toFloat(), 4.0f);
-            graphics.setColour(colour.withAlpha(alpha));
-            graphics.drawFittedText(noteName(note.pitch),
-                                    chip.reduced(1, 0), juce::Justification::centred, 1, 0.75f);
+            const auto hue = static_cast<float>((note.pitch % 12) * 7 % 12) / 12.0f;
+            const auto colour = juce::Colour::fromHSV(hue, 0.45f, 0.95f, note.end ? 0.48f : 0.87f);
+            const juce::Rectangle<float> strip(start, y + 2.0f, end - start, 20.0f);
+            graphics.setColour(colour);
+            graphics.fillRoundedRectangle(strip, 3.0f);
+            if (strip.getWidth() >= 17.0f)
+            {
+                graphics.setColour(juce::Colours::black);
+                graphics.setFont(juce::FontOptions(10.0f));
+                graphics.drawFittedText(noteName(note.pitch), strip.toNearestInt().reduced(2, 0),
+                                        juce::Justification::centredLeft, 1, 0.7f);
+            }
         }
     }
 }

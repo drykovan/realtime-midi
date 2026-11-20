@@ -145,6 +145,10 @@ public:
 
     void releaseResources() override
     {
+        const auto now = juce::Time::getMillisecondCounter();
+        for (std::size_t voice = 0; voice < held.size(); ++voice)
+            if (held[voice] >= 0)
+                detectedNotes.push({now, held[voice], voice, false});
         reset();
 #if defined(REALTIME_MIDI_ENABLE_IAC)
         iac.stop();
@@ -257,11 +261,15 @@ private:
         if (!mirror)
             releaseIac();
 #endif
+        const auto blockTime = juce::Time::getMillisecondCounter();
+        const auto millisecondsPerSample = 1000.0 / std::max(1.0, getSampleRate());
         const auto send = [&](std::size_t voice, int pitch, bool on, int offset)
         {
             const int channel = static_cast<int>(voice) + 1;
             output.addEvent(on ? juce::MidiMessage::noteOn(channel, pitch, juce::uint8{100})
                                : juce::MidiMessage::noteOff(channel, pitch), offset);
+            const auto elapsed = static_cast<std::uint32_t>(offset * millisecondsPerSample);
+            detectedNotes.push({blockTime + elapsed, pitch, voice, on});
 #if defined(REALTIME_MIDI_ENABLE_IAC)
             if (mirror && (on || iacHeld[voice] == pitch))
             {
@@ -299,8 +307,6 @@ private:
 
                 release(i);
                 held = {change.root, change.overtone};
-                if (change.root >= 0 || change.overtone >= 0)
-                    detectedNotes.push(change.root, change.overtone);
                 for (std::size_t voice = 0; voice < held.size(); ++voice)
                     if (held[voice] >= 0)
                         send(voice, held[voice], true, i);
