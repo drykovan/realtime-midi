@@ -8,6 +8,7 @@ namespace realtime_midi
 namespace
 {
 constexpr double pi = 3.14159265358979323846;
+constexpr double hintBoost = 1.15;
 
 int midi(double frequency)
 {
@@ -142,6 +143,7 @@ PitchDetector::Harmonics PitchDetector::measureHarmonics(double root, bool count
     const int last = std::min(32, static_cast<int>(std::min(3600.0, rate * 0.44) / root));
     std::array<double, 32> power{};
     std::array<double, 33> gap{};
+    double overtoneScore = 0.0;
     gap[0] = harmonicPower(root * 0.5);
     for (int h = 1; h <= last; ++h)
     {
@@ -158,6 +160,19 @@ PitchDetector::Harmonics PitchDetector::measureHarmonics(double root, bool count
         }
         if (h < last || countSupport)
             gap[index + 1] = harmonicPower(hz + root * 0.5);
+    }
+    for (int h = 2; overtoneHints.any() && h <= last; ++h)
+    {
+        const auto value = power[static_cast<std::size_t>(h - 1)];
+        if (value < result.onGrid * 0.12)
+            continue;
+        const auto note = midi(h * root);
+        const auto score = value * (overtoneHints[note] ? hintBoost : 1.0);
+        if (score > overtoneScore)
+        {
+            overtoneScore = score;
+            result.overtone = note;
+        }
     }
     if (countSupport)
     {
@@ -217,7 +232,9 @@ PitchDetector::Change PitchDetector::estimate() noexcept
             continue;
         const double agreement = harmonics.onGrid / (harmonics.onGrid + harmonics.between);
         const double coverage = std::min(1.0, harmonics.onGrid / spectralEnergy);
-        const double score = (1.0 - center) * agreement * coverage;
+        const auto note = midi(root);
+        const double score = (1.0 - center) * agreement * coverage
+                           * (fundamentalHints[note] ? hintBoost : 1.0);
         if (agreement >= 0.68 && coverage >= 0.37 && score > bestScore * 1.015)
         {
             bestScore = score;

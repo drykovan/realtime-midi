@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <bitset>
 
 namespace realtime_midi
 {
@@ -20,6 +21,12 @@ public:
     static constexpr float maxWindowMs = 90.0f;
 
     void setControls(float sensitivityPercent, float windowMs) noexcept;
+    using NoteSet = std::bitset<128>;
+    void setPitchHints(NoteSet fundamental, NoteSet overtones) noexcept
+    {
+        fundamentalHints = fundamental;
+        overtoneHints = overtones;
+    }
     void prepare(double sampleRate) noexcept;
     void reset() noexcept;
     Change push(float input) noexcept;
@@ -42,6 +49,7 @@ private:
     std::array<float, 1536> tapered{};
     std::array<float, 1536> window{};
     std::array<double, 320> difference{};
+    NoteSet fundamentalHints, overtoneHints;
     float attackFloor = 0.00065f, relativeRise = 1.62f;
     float requestedWindowMs = defaultWindowMs;
     double rate = 0.0, recentRoot = 0.0;

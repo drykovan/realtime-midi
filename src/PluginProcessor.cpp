@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 
 #if JUCE_MAC && defined(REALTIME_MIDI_DEV_BUILD)
 #include <unistd.h>
@@ -19,6 +20,61 @@ namespace
 {
 constexpr auto attackId = "attackSensitivity";
 constexpr auto windowId = "analysisWindow";
+constexpr auto hintsId = "pitchHints";
+constexpr std::array<const char*, 2> hintKeys{"fundamentalHints", "overtoneHints"};
+constexpr std::array<const char*, 12> noteNames{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+
+class StoredHints
+{
+public:
+    using Notes = realtime_midi::PitchDetector::NoteSet;
+
+    Notes load() const noexcept
+    {
+        return Notes(low.load()) | (Notes(high.load()) << 64);
+    }
+
+    juce::String text() const
+    {
+        const auto notes = load();
+        juce::StringArray names;
+        for (int note = 0; note < 128; ++note)
+            if (notes[note])
+                names.add(juce::String(noteNames[note % 12]) + juce::String(note / 12 - 1));
+        return names.joinIntoString(", ");
+    }
+
+    bool set(const juce::String& input)
+    {
+        Notes notes;
+        for (auto token : juce::StringArray::fromTokens(input.replace("♯", "#").replace("♭", "b"),
+                                                       ", \t\r\n", ""))
+        {
+            if (token.isEmpty())
+                continue;
+            constexpr std::array<int, 7> naturalNotes{0, 2, 4, 5, 7, 9, 11};
+            const int letter = juce::String("CDEFGAB").indexOfChar(juce::CharacterFunctions::toUpperCase(token[0]));
+            if (letter < 0)
+                return false;
+            const int accidental = token[1] == '#' ? 1 : token[1] == 'b' ? -1 : 0;
+            const auto octaveText = token.substring(accidental == 0 ? 1 : 2);
+            const int octave = octaveText.getIntValue();
+            if (octave < -2 || octave > 10 || octaveText != juce::String(octave))
+                return false;
+            const int note = (octave + 1) * 12 + naturalNotes[letter] + accidental;
+            if (note < 0 || note >= 128)
+                return false;
+            notes.set(note);
+        }
+        low.store((notes & Notes(UINT64_MAX)).to_ullong());
+        high.store((notes >> 64).to_ullong());
+        return true;
+    }
+
+private:
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+    std::atomic<std::uint64_t> low{0}, high{0};
+};
 
 juce::AudioProcessorValueTreeState::ParameterLayout makeParameterLayout()
 {
@@ -32,7 +88,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeParameterLayout()
         std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID{windowId, 1}, "Analysis Window",
             juce::NormalisableRange<float>{Detector::minWindowMs, Detector::maxWindowMs, 1.0f},
-            Detector::defaultWindowMs, juce::AudioParameterFloatAttributes().withLabel("ms")));
+            Detector::defaultWindowMs, juce::AudioParameterFloatAttributes().withLabel("ms")),
+        std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID{hintsId, 1}, "Pitch Hints", false));
     return layout;
 }
 
@@ -118,8 +176,10 @@ public:
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override
     {
-        return new RealtimeMidiEditor(*this, *parameters.getParameter(attackId),
-                                     *parameters.getParameter(windowId));
+        return new RealtimeMidiEditor(*this, parameters,
+            [this](int voice) { return hints[voice].text(); },
+            [this](int voice, const juce::String& list) { return hints[voice].set(list); },
+            detectedNotes);
     }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -128,13 +188,30 @@ public:
     void changeProgramName(int, const juce::String&) override {}
     void getStateInformation(juce::MemoryBlock& state) override
     {
-        if (auto xml = parameters.copyState().createXml())
+        auto snapshot = parameters.copyState();
+        for (std::size_t voice = 0; voice < hints.size(); ++voice)
+            snapshot.setProperty(hintKeys[voice], hints[voice].text(), nullptr);
+        if (auto xml = snapshot.createXml())
             copyXmlToBinary(*xml, state);
     }
     void setStateInformation(const void* data, int size) override
     {
         if (auto xml = getXmlFromBinary(data, size); xml && xml->hasTagName(parameters.state.getType()))
-            parameters.replaceState(juce::ValueTree::fromXml(*xml));
+        {
+            auto snapshot = juce::ValueTree::fromXml(*xml);
+            for (std::size_t voice = 0; voice < hints.size(); ++voice)
+                if (!hints[voice].set(snapshot.getProperty(hintKeys[voice]).toString()))
+                    hints[voice].set({});
+            // Projects saved before Pitch Hints contain no toggle parameter.
+            if (!snapshot.getChildWithProperty("id", hintsId).isValid())
+            {
+                juce::ValueTree toggle{"PARAM"};
+                toggle.setProperty("id", hintsId, nullptr);
+                toggle.setProperty("value", 0.0f, nullptr);
+                snapshot.addChild(toggle, -1, nullptr);
+            }
+            parameters.replaceState(snapshot);
+        }
     }
 
 private:
@@ -142,6 +219,9 @@ private:
     {
         detector.setControls(attack->load(std::memory_order_relaxed),
                              window->load(std::memory_order_relaxed));
+        const bool enabled = hintsEnabled->load(std::memory_order_relaxed) > 0.5f;
+        detector.setPitchHints(enabled ? hints[0].load() : StoredHints::Notes{},
+                               enabled ? hints[1].load() : StoredHints::Notes{});
     }
 
 #if defined(REALTIME_MIDI_ENABLE_IAC)
@@ -218,6 +298,8 @@ private:
 
                 release(i);
                 held = {change.root, change.overtone};
+                if (change.root >= 0 || change.overtone >= 0)
+                    detectedNotes.push(change.root, change.overtone);
                 for (std::size_t voice = 0; voice < held.size(); ++voice)
                     if (held[voice] >= 0)
                         send(voice, held[voice], true, i);
@@ -234,6 +316,9 @@ private:
     juce::AudioProcessorValueTreeState parameters;
     const std::atomic<float>* attack = parameters.getRawParameterValue(attackId);
     const std::atomic<float>* window = parameters.getRawParameterValue(windowId);
+    const std::atomic<float>* hintsEnabled = parameters.getRawParameterValue(hintsId);
+    std::array<StoredHints, 2> hints;
+    DetectedNotes detectedNotes;
     realtime_midi::PitchDetector detector;
     std::array<int, 2> held{-1, -1};
     bool pendingOff = false;
