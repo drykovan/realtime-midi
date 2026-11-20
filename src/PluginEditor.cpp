@@ -32,6 +32,10 @@ const auto secondary = juce::Colour::fromRGB(170, 181, 188);
 const auto accent = juce::Colour::fromRGB(155, 217, 195);
 constexpr double historyMs = 1200.0;
 constexpr double holdMs = 350.0;
+constexpr int historyTop = 16, historyHeight = 107;
+constexpr int controlsTop = historyTop + historyHeight + 12, controlsHeight = 81;
+constexpr int hintsTop = controlsTop + controlsHeight + 12, hintsHeight = 131;
+constexpr int statusTop = hintsTop + hintsHeight + 12, statusHeight = 28;
 
 juce::String noteName(int pitch)
 {
@@ -199,21 +203,14 @@ RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor,
       hintsAttachment(parameters, "pitchHints", hintsToggle),
       readHints(std::move(read)), writeHints(std::move(write))
 {
-    styleLabel(title, "Realtime MIDI", 25.0f, foreground, true);
-    styleLabel(versionLabel, "Version", 14.0f, secondary);
-    styleLabel(versionValue, JucePlugin_VersionString, 15.0f, foreground);
 #if defined(REALTIME_MIDI_DEV_BUILD)
-    styleLabel(buildLabel, "Build (UTC)", 14.0f, secondary);
-    const auto buildTime = juce::String(REALTIME_MIDI_DEV_BUILD).replaceCharacter('T', ' ').dropLastCharacters(1);
-    styleLabel(buildValue, buildTime, 15.0f, accent);
+    const auto build = juce::String(REALTIME_MIDI_DEV_BUILD).replaceCharacter('T', ' ').dropLastCharacters(1) + " UTC";
 #else
-    styleLabel(buildLabel, "Build", 14.0f, secondary);
-    styleLabel(buildValue, "Release", 15.0f, foreground);
+    const juce::String build = "Release";
 #endif
-    versionValue.setTitle("Plugin version");
-    buildValue.setTitle("Plugin build");
-    for (auto* label : {&title, &versionLabel, &versionValue, &buildLabel, &buildValue})
-        addAndMakeVisible(*label);
+    styleLabel(buildStatus, juce::String(JucePlugin_VersionString) + " / " + build, 12.0f, secondary);
+    buildStatus.setTitle("Plugin version and build");
+    addAndMakeVisible(buildStatus);
 
     styleLabel(attackLabel, "Attack Sensitivity", 14.0f, secondary);
     styleLabel(windowLabel, "Analysis Window", 14.0f, secondary);
@@ -278,7 +275,7 @@ RealtimeMidiEditor::RealtimeMidiEditor(juce::AudioProcessor& processor,
     overtonePicker.onClick = [this] { openNotePicker(1); };
     startTimerHz(30);
     setOpaque(true);
-    setSize(440, 522);
+    setSize(440, statusTop + statusHeight);
 }
 
 void RealtimeMidiEditor::openNotePicker(int voice)
@@ -338,7 +335,7 @@ void RealtimeMidiEditor::timerCallback()
                     note.pitch = -1;
             }
     if (refresh)
-        repaint(20, 395, getWidth() - 40, 107);
+        repaint(20, historyTop, getWidth() - 40, historyHeight);
 
     if (++hintRefresh < 8)
         return;
@@ -359,35 +356,24 @@ void RealtimeMidiEditor::timerCallback()
 void RealtimeMidiEditor::paint(juce::Graphics& graphics)
 {
     graphics.fillAll(background);
-    const auto card = juce::Rectangle<float>(20.0f, 66.0f, static_cast<float>(getWidth() - 40), 72.0f);
-    graphics.setColour(panel);
-    graphics.fillRoundedRectangle(card, 9.0f);
+    for (const auto area : {juce::Rectangle<int>(20, historyTop, getWidth() - 40, historyHeight),
+                            juce::Rectangle<int>(20, controlsTop, getWidth() - 40, controlsHeight),
+                            juce::Rectangle<int>(20, hintsTop, getWidth() - 40, hintsHeight)})
+    {
+        graphics.setColour(panel);
+        graphics.fillRoundedRectangle(area.toFloat(), 9.0f);
+        graphics.setColour(border);
+        graphics.drawRoundedRectangle(area.toFloat().reduced(0.5f), 9.0f, 1.0f);
+    }
     graphics.setColour(border);
-    graphics.drawRoundedRectangle(card.reduced(0.5f), 9.0f, 1.0f);
-    graphics.drawHorizontalLine(102, card.getX() + 12.0f, card.getRight() - 12.0f);
-    const auto controls = card.withY(154.0f).withHeight(81.0f);
-    graphics.setColour(panel);
-    graphics.fillRoundedRectangle(controls, 9.0f);
-    graphics.setColour(border);
-    graphics.drawRoundedRectangle(controls.reduced(0.5f), 9.0f, 1.0f);
-    const auto hints = card.withY(250.0f).withHeight(131.0f);
-    graphics.setColour(panel);
-    graphics.fillRoundedRectangle(hints, 9.0f);
-    graphics.setColour(border);
-    graphics.drawRoundedRectangle(hints.reduced(0.5f), 9.0f, 1.0f);
-
-    const auto history = card.withY(395.0f).withHeight(107.0f);
-    graphics.setColour(panel);
-    graphics.fillRoundedRectangle(history, 9.0f);
-    graphics.setColour(border);
-    graphics.drawRoundedRectangle(history.reduced(0.5f), 9.0f, 1.0f);
+    graphics.drawHorizontalLine(statusTop, 20.0f, static_cast<float>(getWidth() - 20));
     graphics.setFont(juce::FontOptions(14.0f));
     graphics.setColour(foreground);
-    graphics.drawText("Recent Notes", 34, 402, 120, 24, juce::Justification::centredLeft);
+    graphics.drawText("Recent Notes", 34, historyTop + 7, 120, 24, juce::Justification::centredLeft);
     const auto now = juce::Time::getMillisecondCounterHiRes();
     for (std::size_t voice = 0; voice < recent.size(); ++voice)
     {
-        const int y = 430 + 31 * static_cast<int>(voice);
+        const int y = historyTop + 35 + 31 * static_cast<int>(voice);
         graphics.setColour(secondary);
         graphics.drawText(voice == 0 ? "Fundamental" : "Overtones",
                           34, y, 110, 24, juce::Justification::centredLeft);
@@ -412,21 +398,17 @@ void RealtimeMidiEditor::paint(juce::Graphics& graphics)
 
 void RealtimeMidiEditor::resized()
 {
-    title.setBounds(20, 17, getWidth() - 40, 36);
-    versionLabel.setBounds(34, 67, 84, 35);
-    versionValue.setBounds(126, 67, getWidth() - 160, 35);
-    buildLabel.setBounds(34, 103, 84, 35);
-    buildValue.setBounds(126, 103, getWidth() - 160, 35);
-    attackLabel.setBounds(34, 156, 122, 38);
-    windowLabel.setBounds(34, 195, 122, 38);
-    attackSlider.setBounds(158, 156, getWidth() - 192, 38);
-    windowSlider.setBounds(158, 195, getWidth() - 192, 38);
-    hintsToggle.setBounds(32, 255, 140, 28);
-    fundamentalLabel.setBounds(34, 286, 110, 26);
-    overtoneLabel.setBounds(34, 320, 110, 26);
-    hintFields[0].setBounds(158, 286, getWidth() - 224, 26);
-    hintFields[1].setBounds(158, 320, getWidth() - 224, 26);
-    fundamentalPicker.setBounds(getWidth() - 62, 286, 28, 26);
-    overtonePicker.setBounds(getWidth() - 62, 320, 28, 26);
-    hintStatus.setBounds(34, 349, getWidth() - 68, 26);
+    attackLabel.setBounds(34, controlsTop + 2, 122, 38);
+    windowLabel.setBounds(34, controlsTop + 41, 122, 38);
+    attackSlider.setBounds(158, controlsTop + 2, getWidth() - 192, 38);
+    windowSlider.setBounds(158, controlsTop + 41, getWidth() - 192, 38);
+    hintsToggle.setBounds(32, hintsTop + 5, 140, 28);
+    fundamentalLabel.setBounds(34, hintsTop + 36, 110, 26);
+    overtoneLabel.setBounds(34, hintsTop + 70, 110, 26);
+    hintFields[0].setBounds(158, hintsTop + 36, getWidth() - 224, 26);
+    hintFields[1].setBounds(158, hintsTop + 70, getWidth() - 224, 26);
+    fundamentalPicker.setBounds(getWidth() - 62, hintsTop + 36, 28, 26);
+    overtonePicker.setBounds(getWidth() - 62, hintsTop + 70, 28, 26);
+    hintStatus.setBounds(34, hintsTop + 99, getWidth() - 68, 26);
+    buildStatus.setBounds(34, statusTop + 1, getWidth() - 68, statusHeight - 3);
 }
